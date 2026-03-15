@@ -1,4 +1,8 @@
-dev (bas moi miku) 
+-- ╔══════════════════════════════════════════════════╗
+-- ║              MIKU  —  FPS CHEAT                  ║
+-- ║   ESP | AimBot | TriggerBot | Teleport | Fly     ║
+-- ║          Style : Z3US / Rivals                   ║
+-- ╚══════════════════════════════════════════════════╝
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
@@ -1647,4 +1651,4 @@ end)
 -- Activate default tab
 activateTab("Legit")
 
-print(" voici le script rival undetec dev par qui par moi un fr allé cheat bien ,':)")
+print("✦ MIKU V2 chargé — Appuie sur [Insert] pour ouvrir/fermer ✦")
