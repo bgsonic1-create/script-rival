@@ -1,8 +1,4 @@
--- ╔══════════════════════════════════════════════════╗
--- ║              MIKU  —  FPS CHEAT                  ║
--- ║   ESP | AimBot | TriggerBot | Teleport | Fly     ║
--- ║          Style : Z3US / Rivals                   ║
--- ╚══════════════════════════════════════════════════╝
+dev (bas moi miku) 
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
@@ -30,8 +26,8 @@ local Cfg = {
     },
     TriggerBot = {
         Enabled = false,
-        FOV     = 40,
-        Delay   = 0.03,
+        FOV     = 80,
+        Delay   = 0.05,
     },
     ESP = {
         Enabled    = false,
@@ -67,8 +63,13 @@ local Cfg = {
     },
 
     WallShot = {
-        Enabled = false,  -- tire même derrière les murs
+        Enabled = false,
     },
+    RapidFire = {
+        Enabled = false,  -- supprime latence tir + rechargement
+    },
+
+
 }
 
 -- ══════════════════════════════
@@ -262,33 +263,6 @@ RunService.RenderStepped:Connect(function()
         FovCircle.Color = Color3.fromRGB(255, 220, 0)
     end
 
-    -- TriggerBot : tire UNIQUEMENT si le viseur (centre écran) est sur la tête
-    -- Pas juste dans le cercle FOV — on fait un raycast depuis la caméra
-    if Cfg.TriggerBot.Enabled then
-        local char = LocalPlayer.Character
-        local camCF = Camera.CFrame
-        local ray = RaycastParams.new()
-        ray.FilterType = Enum.RaycastFilterType.Exclude
-        if char then ray.FilterDescendantsInstances = {char} end
-
-        -- On cast depuis le centre exact de la caméra vers où elle regarde
-        local result = workspace:Raycast(camCF.Position, camCF.LookVector * 500, ray)
-        if result and result.Instance then
-            -- Vérifie si ce qu'on touche appartient à un ennemi
-            local hitPart = result.Instance
-            local hitChar = hitPart.Parent
-            local hitPlayer = Players:GetPlayerFromCharacter(hitChar)
-            if hitPlayer and hitPlayer ~= LocalPlayer then
-                if isAlive(hitPlayer) then
-                    if not (Cfg.AimBot.TeamCheck and isTeam(hitPlayer)) then
-                        -- On est bien en train de viser cet ennemi → on tir
-                        task.wait(Cfg.TriggerBot.Delay)
-                        mouse1click()
-                    end
-                end
-            end
-        end
-    end
 end)
 
 -- ══════════════════════════════════════════════════════════
@@ -595,6 +569,126 @@ end)
 
 Players.PlayerRemoving:Connect(removeESP)
 
+-- ══════════════════════════════════════════════════════
+--   RAPID FIRE — supprime latence tir + rechargement
+--   Technique : hook FireServer pour intercepter les
+--   events de reload/shoot de Rivals et les annuler
+--   + hook mouse1click pour spam sans cooldown
+-- ══════════════════════════════════════════════════════
+local rapidConn = nil
+
+local function enableRapidFire()
+    if rapidConn then return end
+
+    -- Hook __namecall pour intercepter FireServer
+    local oldNamecall
+    oldNamecall = hookmetamethod and hookmetamethod(game, "__namecall", (newcclosure or function(f) return f end)(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod() or ""
+        local args = {...}
+
+        if Cfg.RapidFire.Enabled and (method == "FireServer" or method == "InvokeServer") then
+            local name = (typeof(self) == "Instance" and self.Name or ""):lower()
+            -- Bloque les events de reload
+            if name:find("reload") or name:find("recharge") or name:find("cooldown")
+            or name:find("delay") or name:find("wait") then
+                return -- on bloque l event
+            end
+        end
+        return oldNamecall(self, ...)
+    end)) or nil
+
+    -- Supprime aussi le cooldown côté Tool (arme équipée)
+    rapidConn = RunService.Heartbeat:Connect(function()
+        if not Cfg.RapidFire.Enabled then return end
+        local char = LocalPlayer.Character
+        if not char then return end
+        -- Trouve l arme équipée
+        local tool = char:FindFirstChildOfClass("Tool")
+        if not tool then return end
+        -- Reset tous les NumberValue/IntValue de cooldown dans l arme
+        for _, v in ipairs(tool:GetDescendants()) do
+            pcall(function()
+                local n = v.Name:lower()
+                if v:IsA("NumberValue") or v:IsA("IntValue") then
+                    if n:find("cool") or n:find("delay") or n:find("wait")
+                    or n:find("reload") or n:find("timer") or n:find("rate") then
+                        v.Value = 0
+                    end
+                end
+                -- Reset BoolValue de "IsReloading"
+                if v:IsA("BoolValue") then
+                    if n:find("reload") or n:find("reloading") or n:find("charging") then
+                        v.Value = false
+                    end
+                end
+            end)
+        end
+        -- Cherche aussi dans LocalScript/Script
+        local ls = tool:FindFirstChildOfClass("LocalScript") or tool:FindFirstChildOfClass("ModuleScript")
+        if ls then
+            -- Tente de reset les animations de reload
+            for _, anim in ipairs(char:GetDescendants()) do
+                if anim:IsA("AnimationTrack") then
+                    local n = anim.Name:lower()
+                    if n:find("reload") or n:find("recharge") then
+                        pcall(function() anim:Stop(0) end)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function disableRapidFire()
+    if rapidConn then rapidConn:Disconnect(); rapidConn = nil end
+end
+
+
+
+
+
+-- ══════════════════════════════════════════════════════
+--   TRIGGERBOT AMÉLIORÉ — tire dans la tête même si
+--   la cible est sur le côté (pas besoin de viser)
+--   Suffit que le mec soit dans le cercle FOV
+-- ══════════════════════════════════════════════════════
+local triggerCooldown = false
+
+RunService.Heartbeat:Connect(function()
+    if not Cfg.TriggerBot.Enabled then return end
+    if triggerCooldown then return end
+
+    local mousePos = UserInputService:GetMouseLocation()
+    local myChar = LocalPlayer.Character
+    local myHead = myChar and myChar:FindFirstChild("Head")
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if not isAlive(p) then continue end
+        if Cfg.AimBot.TeamCheck and isTeam(p) then continue end
+
+        local head = getHead(p)
+        if not head then continue end
+        if myHead and (head.Position - myHead.Position).Magnitude < 3 then continue end
+
+        local sp, on = toScreen(head.Position)
+        if not on then continue end
+
+        -- Distance depuis la SOURIS (cercle FOV)
+        local d = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+        if d < Cfg.AimBot.FOV then
+            -- Cible dans le cercle → snap silencieux + tir
+            triggerCooldown = true
+            doSnap(head.Position)
+            task.wait(0.05)
+            mouse1click()
+            task.wait(Cfg.TriggerBot.Delay)
+            triggerCooldown = false
+            break
+        end
+    end
+end)
+
 -- ══════════════════════════════
 --             FLY
 -- ══════════════════════════════
@@ -827,14 +921,15 @@ local tabs = {}
 local activeTab = nil
 
 local tabDefs = {
-    { name = "Legit",     icon = "◉" },
-    { name = "Rage",      icon = "⚡" },
-    { name = "Visuals",   icon = "👁" },
-    { name = "Player",    icon = "👤" },
-    { name = "Teleport",  icon = "⊕" },
-    { name = "World",     icon = "◎" },
-    { name = "Misc",      icon = "≡" },
-    { name = "Settings",  icon = "⚙" },
+    { name = "Legit",       icon = "◉" },
+    { name = "TriggerBot",  icon = "🎯" },
+    { name = "Rage",        icon = "⚡" },
+    { name = "Visuals",     icon = "👁" },
+    { name = "Player",      icon = "👤" },
+    { name = "Teleport",    icon = "⊕" },
+    { name = "World",       icon = "◎" },
+    { name = "Misc",        icon = "≡" },
+    { name = "Settings",    icon = "⚙" },
 }
 
 local function makeScroll()
@@ -1049,9 +1144,58 @@ do
     toggle(f, "Sticky Aim",   Cfg.AimBot, "StickyAim")
     slider(f, "FOV",          Cfg.AimBot, "FOV", 10, 400, function(v) FovCircle.Radius=v end)
 
-    sectionTitle(f, "TriggerBot")
-    toggle(f, "TriggerBot Enable", Cfg.TriggerBot, "Enabled")
-    slider(f, "TriggerBot FOV", Cfg.TriggerBot, "FOV", 5, 150)
+
+end
+
+-- ─── TRIGGERBOT ────────────────────────────────────
+do
+    local f = tabs["TriggerBot"].frame
+    sectionTitle(f, "🎯 TriggerBot")
+    toggle(f, "Enable", Cfg.TriggerBot, "Enabled")
+
+    sectionTitle(f, "FOV")
+    slider(f, "FOV TriggerBot", Cfg.TriggerBot, "FOV", 5, 400)
+
+    -- Cercle FOV dédié au TriggerBot (drawing séparé)
+    local TBcircle = Drawing.new("Circle")
+    TBcircle.Visible = false
+    TBcircle.Thickness = 1.2
+    TBcircle.Color = Color3.fromRGB(255, 100, 0)
+    TBcircle.Transparency = 0.6
+    TBcircle.Filled = false
+    TBcircle.NumSides = 64
+    TBcircle.Radius = Cfg.TriggerBot.FOV
+
+    toggle(f, "Afficher cercle FOV TriggerBot", {show=false}, "show", function(v)
+        TBcircle.Visible = v
+    end)
+
+    RunService.RenderStepped:Connect(function()
+        if TBcircle.Visible then
+            local mp = UserInputService:GetMouseLocation()
+            TBcircle.Position = Vector2.new(mp.X, mp.Y)
+            TBcircle.Radius = Cfg.TriggerBot.FOV
+        end
+    end)
+
+    sectionTitle(f, "Délai")
+    slider(f, "Délai tir (x0.01s)", Cfg.TriggerBot, "Delay", 1, 50, function(v)
+        Cfg.TriggerBot.Delay = v / 100
+    end)
+
+    sectionTitle(f, "Info")
+    local info2 = Instance.new("TextLabel", f)
+    info2.Size = UDim2.new(1,0,0,50)
+    info2.BackgroundColor3 = Color3.fromRGB(20,12,38)
+    info2.BorderSizePixel = 0
+    info2.TextColor3 = Color3.fromRGB(180,170,210)
+    info2.TextSize = 11
+    info2.Font = Enum.Font.Gotham
+    info2.TextWrapped = true
+    info2.TextXAlignment = Enum.TextXAlignment.Left
+    info2.Text = "  Si un ennemi entre dans le cercle\n  orange -> tir automatique sur la tete"
+    Instance.new("UICorner", info2).CornerRadius = UDim.new(0,6)
+    local ip2 = Instance.new("UIPadding", info2); ip2.PaddingLeft = UDim.new(0,8)
 end
 
 -- ─── RAGE ──────────────────────────────────────────
@@ -1063,7 +1207,12 @@ do
         else Cfg.AimBot.FOV=150; FovCircle.Radius=150 end
     end)
     toggle(f, "No Recoil (simulé)", {nr=false}, "nr")
-    toggle(f, "Auto Fire (TriggerBot raycast)", Cfg.TriggerBot, "Enabled")
+
+
+    sectionTitle(f, "⚡ Rapid Fire (no reload / no latence)")
+    toggle(f, "Rapid Fire Enable", Cfg.RapidFire, "Enabled", function(v)
+        if v then enableRapidFire() else disableRapidFire() end
+    end)
 
     sectionTitle(f, "Auto-TP")
     toggle(f, "Auto-TP (se TP sur l'ennemi le plus proche)", Cfg.AutoTP, "Enabled", function(v)
@@ -1090,6 +1239,7 @@ do
     toggle(f, "Afficher cercle FOV", {s=true}, "s", function(v)
         FovCircle.Visible = v and Cfg.AimBot.Enabled
     end)
+
 end
 
 -- ─── PLAYER ────────────────────────────────────────
@@ -1497,4 +1647,4 @@ end)
 -- Activate default tab
 activateTab("Legit")
 
-print("✦ MIKU V2 chargé — Appuie sur [Insert] pour ouvrir/fermer ✦")
+print(" voici le script rival undetec dev par qui par moi un fr allé cheat bien ,':)")
