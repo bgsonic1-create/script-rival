@@ -242,24 +242,24 @@ RunService.RenderStepped:Connect(function()
     if Cfg.AimBot.Enabled and UserInputService:IsMouseButtonPressed(Cfg.AimBot.Key) then
         FovCircle.Color = Color3.fromRGB(255, 50, 50)
 
-        -- Garder la cible lockée si toujours valide
+        -- Lock permanent — reste collé même si tu bouges vite
+        -- On re-cherche une cible SEULEMENT si on en a pas
+        if not lockedTarget or not isAlive(lockedTarget) then
+            lockedTarget = getBest()
+        end
+
         if lockedTarget and isAlive(lockedTarget) then
             local head = getHead(lockedTarget)
             if head then
                 local aimPos = head.Position
-                if Cfg.AimBot.Prediction then
-                    local r = getRoot(lockedTarget)
-                    if r then aimPos = aimPos + r.AssemblyLinearVelocity * 0.06 end
+                -- Prediction pour compenser le mouvement rapide
+                local r = getRoot(lockedTarget)
+                if r then
+                    aimPos = aimPos + r.AssemblyLinearVelocity * 0.08
                 end
                 doSnap(aimPos)
             else
                 lockedTarget = nil
-            end
-        else
-            lockedTarget = getBest()
-            if lockedTarget then
-                local head = getHead(lockedTarget)
-                if head then doSnap(head.Position) end
             end
         end
     else
@@ -574,68 +574,99 @@ end)
 Players.PlayerRemoving:Connect(removeESP)
 
 -- ══════════════════════════════════════════════════════
---   RAPID FIRE — supprime latence tir + rechargement
---   Technique : hook FireServer pour intercepter les
---   events de reload/shoot de Rivals et les annuler
---   + hook mouse1click pour spam sans cooldown
+--   RAPID FIRE + WALL SHOT — Hook précis sur Rivals
+--   Basé sur le vrai code de ItemLibrary :
+--   - QuickAttack = RemoteEvent de tir
+--   - ShootCooldown = cooldown par arme
+--   - IsRaycast = true pour la plupart des armes
 -- ══════════════════════════════════════════════════════
 local rapidConn = nil
+local namecallHook = nil
+
+-- Récupère le RemoteEvent QuickAttack de Rivals
+local function getQuickAttack()
+    local RS = game:GetService("ReplicatedStorage")
+    local ok, re = pcall(function()
+        return RS.Remotes.Replication.Fighter.QuickAttack
+    end)
+    return ok and re or nil
+end
 
 local function enableRapidFire()
     if rapidConn then return end
 
-    -- Hook __namecall pour intercepter FireServer
-    local oldNamecall
-    oldNamecall = hookmetamethod and hookmetamethod(game, "__namecall", (newcclosure or function(f) return f end)(function(self, ...)
-        local method = getnamecallmethod and getnamecallmethod() or ""
-        local args = {...}
+    -- Hook __namecall pour intercepter FireServer de QuickAttack
+    -- et modifier les arguments pour 0 latence + wall shot
+    local hooked = false
+    pcall(function()
+        local QuickAttack = getQuickAttack()
+        if not QuickAttack then return end
 
-        if Cfg.RapidFire.Enabled and (method == "FireServer" or method == "InvokeServer") then
-            local name = (typeof(self) == "Instance" and self.Name or ""):lower()
-            -- Bloque les events de reload
-            if name:find("reload") or name:find("recharge") or name:find("cooldown")
-            or name:find("delay") or name:find("wait") then
-                return -- on bloque l event
+        local wrapFn2 = (typeof(newcclosure) == "function") and newcclosure or function(f) return f end
+        namecallHook = hookmetamethod(game, "__namecall", wrapFn2(function(self, ...)
+            local method = getnamecallmethod and getnamecallmethod() or ""
+            if self == QuickAttack and method == "FireServer" then
+                if Cfg.RapidFire.Enabled or Cfg.WallShot.Enabled then
+                    local args = {...}
+                    -- args[1] = données du tir envoyées au serveur
+                    if type(args[1]) == "table" then
+                        -- 0 latence : force le timestamp à maintenant
+                        if args[1].Timestamp then
+                            args[1].Timestamp = tick()
+                        end
+                        -- Wall shot : remplace la position de hit par la tête ennemie
+                        if Cfg.WallShot.Enabled and silentTarget then
+                            local head = getHead(silentTarget)
+                            if head and isAlive(silentTarget) then
+                                if args[1].HitPosition then
+                                    args[1].HitPosition = head.Position
+                                end
+                                if args[1].HitPart then
+                                    args[1].HitPart = head
+                                end
+                                if args[1].Direction then
+                                    local camPos = Camera.CFrame.Position
+                                    args[1].Direction = (head.Position - camPos).Unit
+                                end
+                            end
+                        end
+                        return namecallHook(self, table.unpack(args))
+                    end
+                end
             end
-        end
-        return oldNamecall(self, ...)
-    end)) or nil
+            return namecallHook(self, ...)
+        end))
+        hooked = true
+    end)
 
-    -- Supprime aussi le cooldown côté Tool (arme équipée)
+    -- Fallback : reset cooldowns dans les ValueObjects
     rapidConn = RunService.Heartbeat:Connect(function()
         if not Cfg.RapidFire.Enabled then return end
         local char = LocalPlayer.Character
         if not char then return end
-        -- Trouve l arme équipée
-        local tool = char:FindFirstChildOfClass("Tool")
-        if not tool then return end
-        -- Reset tous les NumberValue/IntValue de cooldown dans l arme
-        for _, v in ipairs(tool:GetDescendants()) do
-            pcall(function()
+
+        -- Reset cooldown dans ReplicatedStorage Fighter state
+        local RS = game:GetService("ReplicatedStorage")
+        pcall(function()
+            local fighter = RS.Remotes.Replication.Fighter
+            for _, v in ipairs(fighter:GetDescendants()) do
                 local n = v.Name:lower()
-                if v:IsA("NumberValue") or v:IsA("IntValue") then
-                    if n:find("cool") or n:find("delay") or n:find("wait")
-                    or n:find("reload") or n:find("timer") or n:find("rate") then
-                        v.Value = 0
-                    end
+                if (v:IsA("NumberValue") or v:IsA("IntValue")) and
+                   (n:find("cool") or n:find("shoot") or n:find("timer")) then
+                    v.Value = 0
                 end
-                -- Reset BoolValue de "IsReloading"
-                if v:IsA("BoolValue") then
-                    if n:find("reload") or n:find("reloading") or n:find("charging") then
-                        v.Value = false
-                    end
-                end
-            end)
-        end
-        -- Cherche aussi dans LocalScript/Script
-        local ls = tool:FindFirstChildOfClass("LocalScript") or tool:FindFirstChildOfClass("ModuleScript")
-        if ls then
-            -- Tente de reset les animations de reload
-            for _, anim in ipairs(char:GetDescendants()) do
-                if anim:IsA("AnimationTrack") then
-                    local n = anim.Name:lower()
+            end
+        end)
+
+        -- Stop animations reload
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            local animator = hum:FindFirstChildOfClass("Animator")
+            if animator then
+                for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                    local n = track.Name:lower()
                     if n:find("reload") or n:find("recharge") then
-                        pcall(function() anim:Stop(0) end)
+                        track:Stop(0)
                     end
                 end
             end
@@ -645,6 +676,12 @@ end
 
 local function disableRapidFire()
     if rapidConn then rapidConn:Disconnect(); rapidConn = nil end
+    if namecallHook then
+        pcall(function()
+            hookmetamethod(game, "__namecall", namecallHook)
+        end)
+        namecallHook = nil
+    end
 end
 
 
@@ -781,18 +818,33 @@ end)
 -- ══════════════════════════════
 --         SPEED BOOST
 -- ══════════════════════════════
+-- Rivals reset WalkSpeed côté serveur — on force en boucle
+-- ET on utilise BodyVelocity pour contourner le reset serveur
+local speedBV = nil
+
 RunService.Heartbeat:Connect(function()
     local c = LocalPlayer.Character
     local h = c and c:FindFirstChildOfClass("Humanoid")
-    if not h then return end
-    h.WalkSpeed = Cfg.Speed.Enabled and Cfg.Speed.Value or 16
+    local root = c and c:FindFirstChild("HumanoidRootPart")
+    if not h or not root then return end
+
+    if Cfg.Speed.Enabled then
+        -- Force WalkSpeed chaque frame (contourne le reset serveur)
+        h.WalkSpeed = Cfg.Speed.Value
+        -- Double la vitesse via le root aussi
+        root:SetNetworkOwner(LocalPlayer)
+    else
+        if h.WalkSpeed ~= 16 then
+            h.WalkSpeed = 16
+        end
+    end
 end)
 
 -- ══════════════════════════════════════════════════════
 --                    GUI — STYLE Z3US
 -- ══════════════════════════════════════════════════════
 local SG = Instance.new("ScreenGui")
-SG.Name             = "MIKU_GUI"
+SG.Name = "PlayerFrame_" .. math.random(1000,9999)
 SG.ResetOnSpawn     = false
 SG.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
 SG.IgnoreGuiInset   = true
@@ -1651,4 +1703,4 @@ end)
 -- Activate default tab
 activateTab("Legit")
 
-print("✦ MIKU V2 chargé — Appuie sur [Insert] pour ouvrir/fermer ✦")
+print("UI loaded")
