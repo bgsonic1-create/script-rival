@@ -892,7 +892,7 @@ local TITLE = Instance.new("TextLabel", TBAR)
 TITLE.Size             = UDim2.new(1,-100,1,0)
 TITLE.Position         = UDim2.new(0,30,0,0)
 TITLE.BackgroundTransparency = 1
-TITLE.Text             = "CRAZY 4011"
+TITLE.Text             = "CRAZY"
 TITLE.TextColor3       = Color3.fromRGB(255,255,255)
 TITLE.TextSize         = 14
 TITLE.Font             = Enum.Font.GothamBold
@@ -1703,4 +1703,4 @@ end)
 -- Activate default tab
 activateTab("Legit")
 
-print("yo jeune cheater un truc dit pas que c'est toi qui ma crée merci")
+print("universal")
