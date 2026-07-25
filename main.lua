@@ -1374,7 +1374,7 @@ local tabs = {}
 local activeTab = nil
 
 local tabDefs = {
-    { name = "Legit V2 up", icon = "卐" },
+    { name = "Legit Power", icon = "💪" },
     { name = "TriggerBot",  icon = "🎯" },
     { name = "Rage",        icon = "⚡" },
     { name = "Visuals",     icon = "👁" },
