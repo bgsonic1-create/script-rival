@@ -1,7 +1,7 @@
 -- ╔══════════════════════════════════════════════════╗
 -- ║              crazy  —  FPS CHEAT                  ║
 -- ║   ESP | AimBot | TriggerBot | Teleport | Fly     ║
--- ║          Style : Z3US / Rivals                   ║
+-- ║          Style : Z3US /                 ║
 -- ╚══════════════════════════════════════════════════╝
 
 local Players          = game:GetService("Players")
@@ -27,6 +27,14 @@ local Cfg = {
         Prediction   = false,
         StickyAim    = false,
         Key          = Enum.UserInputType.MouseButton2,
+    },
+    LegitTrigger = {
+        Enabled      = false,   -- MODE LEGIT : ennemi dans FOV → lock tête + tir auto
+        LockHead     = true,    -- viser SYSTEMATIQUEMENT la tête
+        FOVOnly      = true,    -- cible QUE dans le cercle FOV
+        WallCheck    = false,
+        TeamCheck    = false,
+        Delay        = 0.05,    -- délai entre tirs
     },
     TriggerBot = {
         Enabled = false,
@@ -120,6 +128,17 @@ local function hasLOS(target)
     return result == nil
 end
 
+-- LEGIT : vérifie si un joueur est DANS le FOV circle
+local function isInFOV(p, fovRadius)
+    local head = getHead(p)
+    if not head then return false end
+    local sp, on = toScreen(head.Position)
+    if not on then return false end
+    local mousePos = UserInputService:GetMouseLocation()
+    local d = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+    return d <= (fovRadius or Cfg.AimBot.FOV)
+end
+
 -- ══════════════════════════════
 --          FOV CIRCLE
 -- ══════════════════════════════
@@ -134,7 +153,7 @@ FovCircle.Radius      = Cfg.AimBot.FOV
 FovCircle.Position    = screenCenter()
 
 -- ══════════════════════════════════════════════════════
---   AIMBOT — Compatible toutes armes Rivals
+--   AIMBOT — Compatible toutes armes 
 --   Méthode : on cherche le Camera.CameraSubject pour
 --   savoir si on est en 1ère personne (outil équipé)
 --   et on force la rotation via le Motor6D du cou + root
@@ -200,7 +219,7 @@ local function getNeckMotor()
 end
 
 -- ══════════════════════════════════════════════════════════
--- AIMBOT CORE — méthode exacte des vrais scripts Rivals
+-- AIMBOT CORE — méthode exacte des vrais scripts 
 -- En 1ère personne  : Camera.CFrame direct (instantané)
 -- En 3ème personne  : mousemoverel (suit la souris)
 -- Le FOV circle suit la souris comme dans KiCiaHook
@@ -232,18 +251,193 @@ local function doSnap(headPos)
     end
 end
 
-RunService.RenderStepped:Connect(function()
-    -- FOV circle suit la souris (comme KiCiaHook/Exunys)
+-- ══════════════════════════════════════════════════════════
+--   LEGIT POWER :
+--   • Tu MAINTIENS CLIC DROIT (MOI qui contrôle la souris !)
+--   • Si ennemi DANS FOV circle → lock SUR SA TÊTE (silencieux)
+--   • Dès que c'est locké → TIR AUTOMATIQUE (clic gauche)
+--   • LÂCHE clic droit → stop immédiat (pas d'autoclick)
+-- ══════════════════════════════════════════════════════════
+local lpCooldown = false
+local lpLockedThisFrame = false  -- nouveau lock cette frame → tir INSTANT
+-- Flags sync premier tir (SIMPLE : on garde en mémoire quelle cible
+-- était lockée la frame d'avant. Si la cible est différente → NOUVEAU
+-- lock → tir direct. Pas de "frame N/N+1" compliqué qui buggue.)
+local lpLastLockedPlayer = nil
+
+-- Helper : supporte à la fois souris (UserInputType) et clavier (KeyCode)
+-- (évite que si Cfg.AimBot.Key = Enum.KeyCode.C ça ne marche pas)
+local function isAimKeyDown()
+    local k = Cfg.AimBot.Key
+    if typeof(k) == "EnumItem" then
+        if tostring(k.EnumType) == "UserInputType" then
+            return UserInputService:IsMouseButtonPressed(k)
+        elseif tostring(k.EnumType) == "KeyCode" then
+            return UserInputService:IsKeyDown(k)
+        end
+    end
+    -- Fallback : clic droit
+    return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+end
+
+local function getLegitPowerTarget()
+    -- ─────── LOCK FERME À TOUTE ÉPREUVE ───────
+    -- Si on a déjà une cible : ON LA GARDE SAUF SI
+    --   • elle est morte
+    --   • derrière un mur
+    --   • vraiment HORS FOV (1.6x la taille du cercle)
+    -- Plus de dot product qui bloquait en scope / FOV étroit
+    if lpLockTarget and isAlive(lpLockTarget) then
+        local h = getHead(lpLockTarget)
+        if h then
+            -- 1) Wall Check sur la cible stickée
+            if Cfg.LegitTrigger.WallCheck then
+                local myChar = LocalPlayer.Character
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                if myRoot then
+                    local ray = RaycastParams.new()
+                    ray.FilterDescendantsInstances = {myChar, lpLockTarget.Character}
+                    ray.FilterType = Enum.RaycastFilterType.Exclude
+                    local hit = workspace:Raycast(myRoot.Position, (h.Position - myRoot.Position), ray)
+                    if hit then return nil end
+                end
+            end
+
+            -- 2) FOV check avec tolérance MODÉRÉE (1.6x)
+            if Cfg.LegitTrigger.FOVOnly then
+                local mpos = UserInputService:GetMouseLocation()
+                local sp, on = toScreen(h.Position)
+                if on then
+                    local d = (Vector2.new(sp.X, sp.Y) - mpos).Magnitude
+                    if d <= (Cfg.AimBot.FOV * 1.6) then
+                        return lpLockTarget
+                    end
+                end
+            else
+                return lpLockTarget
+            end
+        end
+    end
+
+    local best, bestD = nil, math.huge
+    local mpos = UserInputService:GetMouseLocation()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if not isAlive(p) then continue end
+        if Cfg.LegitTrigger.TeamCheck and isTeam(p) then continue end
+
+        local head = getHead(p)
+        if not head then continue end
+
+        -- Wall Check
+        if Cfg.LegitTrigger.WallCheck then
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if myRoot then
+                local ray = RaycastParams.new()
+                ray.FilterDescendantsInstances = {myChar, p.Character}
+                ray.FilterType = Enum.RaycastFilterType.Exclude
+                local hit = workspace:Raycast(myRoot.Position, (head.Position - myRoot.Position), ray)
+                if hit then continue end
+            end
+        end
+
+        local sp, on = toScreen(head.Position)
+        if not on then continue end
+
+        local d = (Vector2.new(sp.X, sp.Y) - mpos).Magnitude
+
+        -- Nouvelle cible : FOV strict
+        if Cfg.LegitTrigger.FOVOnly and d > Cfg.AimBot.FOV then continue end
+
+        if d < bestD then
+            bestD = d
+            best = p
+        end
+    end
+    return best
+end
+
+-- Silent Aim Hook pour LEGIT POWER
+local lpLockTarget = nil
+local lpSilentActive = false
+local lpPreviousTarget = nil  -- pour détecter NOUVEAU lock
+-- ⚠️ On a RETIRÉ la rotation de HumanoidRootPart/Waist car elle
+--    faisait trembler la caméra quand tu visais en hauteur/bas
+--    (elle s'opposait à Camera.CFrame = ...). Maintenant on ne
+--    touche QU'À LA CAMÉRA + SILENT AIM (les balles vont au bon
+--    endroit via le hook, pas besoin de tourner le corps).
+
+-- ════════════════════════════════════════════════════════════
+--  🎥 LOCK CAMÉRA + RECHERCHE CIBLE → PRIORITÉ TRÈS HAUTE
+--  BindToRenderStep priorité 100 : s'exécute AVANT le rendu
+--  de la caméra de Roblox. Donc la rotation est APPLIQUÉE
+--  AVANT que Mouse.Hit / les rayons soient calculés.
+-- ════════════════════════════════════════════════════════════
+RunService:BindToRenderStep("LegitCam", Enum.RenderPriority.Camera.Value - 1, function()
+    -- FOV circle suit la souris
     local mpos = UserInputService:GetMouseLocation()
     FovCircle.Position = Vector2.new(mpos.X, mpos.Y)
     FovCircle.Radius   = Cfg.AimBot.FOV
 
-    -- AimBot
-    if Cfg.AimBot.Enabled and UserInputService:IsMouseButtonPressed(Cfg.AimBot.Key) then
+    local keyDown = isAimKeyDown()  -- ✅ helper souris + clavier
+    local legitOn = Cfg.LegitTrigger.Enabled
+    local aimbotOn = Cfg.AimBot.Enabled
+
+    -- Reset lock si on lâche la touche OU on désactive
+    if not keyDown or (not legitOn and not aimbotOn) then
+        lpLockTarget = nil
+        lpLastLockedPlayer = nil
+        lpSilentActive = false
+        lpLockedThisFrame = false
+        FovCircle.Color = Color3.fromRGB(255, 220, 0)
+        return
+    end
+
+    -- ───── LEGIT POWER (prioritaire si activé) ─────
+    if legitOn then
+        FovCircle.Color = Color3.fromRGB(255, 80, 20)
+
+        local previousPlayer = lpLockTarget  -- mémorise avant de chercher
+        local target = getLegitPowerTarget()
+        lpLockTarget = target
+
+        -- Détecte NOUVEAU lock cette frame
+        lpLockedThisFrame = (target ~= nil and previousPlayer ~= target)
+
+        if target and isAlive(target) then
+            local head = getHead(target)
+            if head then
+                local headPos = head.Position
+                local r = getRoot(target)
+                if r and Cfg.AimBot.Prediction then
+                    headPos = headPos + r.AssemblyLinearVelocity * 0.135
+                end
+
+                lpSilentActive = true
+
+                -- 🔒 LOCK FERME : Camera.CFrame FORCÉ (priorité haute → avant rendu)
+                local camPos = Camera.CFrame.Position
+                Camera.CFrame = CFrame.new(camPos, headPos)
+            else
+                lpLockTarget = nil
+                lpSilentActive = false
+                lpLockedThisFrame = false
+            end
+        else
+            lpSilentActive = false
+            lpLockedThisFrame = false
+        end
+
+        -- Mémorise la cible lockée de cette frame
+        lpLastLockedPlayer = lpLockTarget
+        return
+    end
+
+    -- ───── AIMBOT CLASSIQUE ─────
+    if aimbotOn then
         FovCircle.Color = Color3.fromRGB(255, 50, 50)
 
-        -- Lock permanent — reste collé même si tu bouges vite
-        -- On re-cherche une cible SEULEMENT si on en a pas
         if not lockedTarget or not isAlive(lockedTarget) then
             lockedTarget = getBest()
         end
@@ -252,21 +446,55 @@ RunService.RenderStepped:Connect(function()
             local head = getHead(lockedTarget)
             if head then
                 local aimPos = head.Position
-                -- Prediction pour compenser le mouvement rapide
                 local r = getRoot(lockedTarget)
-                if r then
+                if r and Cfg.AimBot.Prediction then
                     aimPos = aimPos + r.AssemblyLinearVelocity * 0.08
                 end
                 doSnap(aimPos)
             else
                 lockedTarget = nil
             end
+        else
+            lockedTarget = nil
         end
-    else
-        lockedTarget = nil
-        FovCircle.Color = Color3.fromRGB(255, 220, 0)
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════
+--  🔫 BOUCLE DE TIR → exécutée JUSTE APRÈS la caméra
+--  BindToRenderStep priorité +50 : APRÈS rotation caméra
+--  Donc Mouse.Hit est bien seté.
+-- ════════════════════════════════════════════════════════════
+RunService:BindToRenderStep("LegitShoot", Enum.RenderPriority.Camera.Value + 50, function()
+    if not Cfg.LegitTrigger.Enabled then return end
+    if not isAimKeyDown() then return end
+    if not lpLockTarget then return end
+    if not lpSilentActive then return end
+
+    local head = getHead(lpLockTarget)
+    if not head or not isAlive(lpLockTarget) then return end
+
+    -- ── 1er TIR (nouveau lock cette frame) : INSTANTANÉ, PAS DE ATTENTE ──
+    if lpLockedThisFrame then
+        lpLockedThisFrame = false
+        pcall(function() mouse1click() end)
+        lpCooldown = true
+        task.spawn(function()
+            task.wait(Cfg.LegitTrigger.Delay)
+            lpCooldown = false
+        end)
+        return
     end
 
+    -- Tirs suivants : respect cooldown
+    if lpCooldown then return end
+
+    lpCooldown = true
+    pcall(function() mouse1click() end)
+    task.spawn(function()
+        task.wait(Cfg.LegitTrigger.Delay)
+        lpCooldown = false
+    end)
 end)
 
 -- ══════════════════════════════════════════════════════════
@@ -308,6 +536,9 @@ RunService.Heartbeat:Connect(updateSilentTarget)
 --   Croix rouge sur la tête + ligne depuis ta souris
 -- ══════════════════════════════════════════════════════
 
+-- ─────────────────────────────────────────────────────
+--  Indicateurs pour SILENT AIM (WallShot)
+-- ─────────────────────────────────────────────────────
 -- Croix sur la tête lockée
 local SAcross1 = Drawing.new("Line")
 SAcross1.Visible = false; SAcross1.Thickness = 2
@@ -335,60 +566,154 @@ SAlabel.Font = Drawing.Fonts.UI; SAlabel.Outline = true
 SAlabel.Center = true; SAlabel.Color = Color3.fromRGB(255,60,60)
 SAlabel.Text = "● SILENT LOCK"
 
+-- ─────────────────────────────────────────────────────
+--  Indicateurs pour 💪 LEGIT POWER (box sur la TÊTE)
+-- ─────────────────────────────────────────────────────
+local LPboxT = Drawing.new("Line")  -- top
+LPboxT.Visible = false; LPboxT.Thickness = 3
+LPboxT.Color = Color3.fromRGB(255, 0, 80); LPboxT.Transparency = 0
+
+local LPboxB = Drawing.new("Line")  -- bottom
+LPboxB.Visible = false; LPboxB.Thickness = 3
+LPboxB.Color = Color3.fromRGB(255, 0, 80); LPboxB.Transparency = 0
+
+local LPboxL = Drawing.new("Line")  -- left
+LPboxL.Visible = false; LPboxL.Thickness = 3
+LPboxL.Color = Color3.fromRGB(255, 0, 80); LPboxL.Transparency = 0
+
+local LPboxR = Drawing.new("Line")  -- right
+LPboxR.Visible = false; LPboxR.Thickness = 3
+LPboxR.Color = Color3.fromRGB(255, 0, 80); LPboxR.Transparency = 0
+
+-- Label ROUGE GROS pour LEGIT POWER lock
+local LPlabel = Drawing.new("Text")
+LPlabel.Visible = false; LPlabel.Size = 17
+LPlabel.Font = Drawing.Fonts.UI; LPlabel.Outline = true
+LPlabel.Center = true; LPlabel.Color = Color3.fromRGB(255, 30, 90)
+LPlabel.Text = "🎯 TÊTE LOCKÉE"
+
 RunService.RenderStepped:Connect(function()
-    if not Cfg.WallShot.Enabled or not silentTarget then
-        SAcross1.Visible = false; SAcross2.Visible = false
-        SAcircle.Visible = false; SAline.Visible = false
-        SAlabel.Visible = false
-        return
+    -- ── Cache TOUS les indicateurs d'abord ──
+    SAcross1.Visible = false; SAcross2.Visible = false
+    SAcircle.Visible = false; SAline.Visible = false
+    SAlabel.Visible = false
+    LPboxT.Visible = false; LPboxB.Visible = false
+    LPboxL.Visible = false; LPboxR.Visible = false
+    LPlabel.Visible = false
+
+    -- Quelle cible pour l'indicateur visuel ?
+    -- Priorité : Legit Power lock > WallShot Silent Aim
+    local visTarget = nil
+    local isLegit = false
+    if Cfg.LegitTrigger.Enabled and lpLockTarget and isAlive(lpLockTarget)
+       and isAimKeyDown() then  -- ✅ helper souris + clavier (avant IsMouseButtonPressed buggé si KeyCode)
+        visTarget = lpLockTarget
+        isLegit = true
+    elseif Cfg.WallShot.Enabled and silentTarget then
+        visTarget = silentTarget
     end
 
-    local head = getHead(silentTarget)
-    if not head or not isAlive(silentTarget) then
-        SAcross1.Visible = false; SAcross2.Visible = false
-        SAcircle.Visible = false; SAline.Visible = false
-        SAlabel.Visible = false
-        return
-    end
+    if not visTarget then return end
+
+    local head = getHead(visTarget)
+    if not head or not isAlive(visTarget) then return end
 
     local sp, onScreen = Camera:WorldToViewportPoint(head.Position)
+    if not (onScreen and sp.Z > 0) then return end
+
     local headSP = Vector2.new(sp.X, sp.Y)
     local mousePos = UserInputService:GetMouseLocation()
-    local sz = 10 -- taille de la croix
 
-    if onScreen and sp.Z > 0 then
-        -- Croix ✕ sur la tête
-        SAcross1.From = headSP - Vector2.new(sz, sz)
-        SAcross1.To   = headSP + Vector2.new(sz, sz)
-        SAcross1.Visible = true
+    -- ═══════════════════════════════════════
+    --  💪 MODE LEGIT POWER : BOITE ROUGE + TEXTE GROS
+    -- ═══════════════════════════════════════
+    if isLegit then
+        -- ── Projette les 8 COINS de la bounding box de la Head sur l'écran ──
+        local sx, sy = head.Size.X, head.Size.Y, head.Size.Z
+        local corners = {
+            head.CFrame * CFrame.new( sx/2,  sy/2,  sz/2),
+            head.CFrame * CFrame.new( sx/2,  sy/2, -sz/2),
+            head.CFrame * CFrame.new( sx/2, -sy/2,  sz/2),
+            head.CFrame * CFrame.new( sx/2, -sy/2, -sz/2),
+            head.CFrame * CFrame.new(-sx/2,  sy/2,  sz/2),
+            head.CFrame * CFrame.new(-sx/2,  sy/2, -sz/2),
+            head.CFrame * CFrame.new(-sx/2, -sy/2,  sz/2),
+            head.CFrame * CFrame.new(-sx/2, -sy/2, -sz/2),
+        }
+        local minX, minY = math.huge, math.huge
+        local maxX, maxY = -math.huge, -math.huge
+        for _, c in ipairs(corners) do
+            local p, ok = Camera:WorldToViewportPoint(c.Position)
+            if ok and p.Z > 0 then
+                if p.X < minX then minX = p.X end
+                if p.X > maxX then maxX = p.X end
+                if p.Y < minY then minY = p.Y end
+                if p.Y > maxY then maxY = p.Y end
+            end
+        end
+        -- Si les 8 coins n'ont pas pu être projetés → fallback carré fixe
+        if minX == math.huge then
+            local fs = 36  -- fallback size
+            minX = headSP.X - fs; maxX = headSP.X + fs
+            minY = headSP.Y - fs; maxY = headSP.Y + fs
+        else
+            -- Petit padding pour être sûr que la box englobe bien
+            local padX = (maxX - minX) * 0.15
+            local padY = (maxY - minY) * 0.15
+            minX = minX - padX; maxX = maxX + padX
+            minY = minY - padY; maxY = maxY + padY
+        end
 
-        SAcross2.From = headSP + Vector2.new(-sz, sz)
-        SAcross2.To   = headSP + Vector2.new(sz, -sz)
-        SAcross2.Visible = true
+        -- Dessine la BOITE (4 côtés ROUGES ÉPAIS)
+        local TL = Vector2.new(minX, minY)
+        local TR = Vector2.new(maxX, minY)
+        local BL = Vector2.new(minX, maxY)
+        local BR = Vector2.new(maxX, maxY)
 
-        -- Cercle autour
-        SAcircle.Position = headSP
-        SAcircle.Visible = true
+        LPboxT.From = TL; LPboxT.To = TR; LPboxT.Visible = true
+        LPboxB.From = BL; LPboxB.To = BR; LPboxB.Visible = true
+        LPboxL.From = TL; LPboxL.To = BL; LPboxL.Visible = true
+        LPboxR.From = TR; LPboxR.To = BR; LPboxR.Visible = true
 
-        -- Ligne souris → tête
-        SAline.From = mousePos
-        SAline.To   = headSP
-        SAline.Visible = true
-
-        -- Label
-        SAlabel.Position = Vector2.new(headSP.X, headSP.Y - 22)
-        SAlabel.Visible = true
-    else
-        -- Cible hors écran mais lockée — flèche vers le bord
-        SAcross1.Visible = false; SAcross2.Visible = false
-        SAcircle.Visible = false; SAline.Visible = false
-        SAlabel.Visible = false
+        -- Texte GROS "🎯 TÊTE LOCKÉE" AU DESSUS
+        LPlabel.Position = Vector2.new(headSP.X, minY - 24)
+        LPlabel.Visible = true
+        return
     end
+
+    -- ═══════════════════════════════════════
+    --  ● MODE SILENT AIM (WallShot) : classique
+    -- ═══════════════════════════════════════
+    local sz = 10 -- taille de la croix
+    -- Croix ✕ sur la tête
+    SAcross1.From = headSP - Vector2.new(sz, sz)
+    SAcross1.To   = headSP + Vector2.new(sz, sz)
+    SAcross1.Visible = true
+
+    SAcross2.From = headSP + Vector2.new(-sz, sz)
+    SAcross2.To   = headSP + Vector2.new(sz, -sz)
+    SAcross2.Visible = true
+
+    -- Cercle autour
+    SAcircle.Position = headSP
+    SAcircle.Visible = true
+
+    -- Ligne souris → tête
+    SAline.From = mousePos
+    SAline.To   = headSP
+    SAline.Visible = true
+
+    -- Label
+    SAlabel.Text = "● SILENT LOCK"
+    SAlabel.Color = Color3.fromRGB(255,60,60)
+    SAlabel.Position = Vector2.new(headSP.X, headSP.Y - 22)
+    SAlabel.Visible = true
 end)
 
 -- ══════════════════════════════════════════════════════
 -- SILENT AIM HOOK — compatible Xeno + tous exécuteurs
 -- Ta souris bouge PAS — balles vont sur la tête ennemie
+-- Ajoute aussi le support de LEGIT POWER LOCK
 -- ══════════════════════════════════════════════════════
 local silentHookActive = false
 
@@ -397,18 +722,31 @@ local wrapFn = (typeof(newcclosure) == "function") and newcclosure or function(f
 
 local hookSuccess = pcall(function()
     local origIndex = hookmetamethod(Mouse, "__index", wrapFn(function(self, key)
+        -- PRIORITÉ 1 : LEGIT POWER lock (si clic droit maintenu)
+        local legitLockedHead = nil
+        if Cfg.LegitTrigger.Enabled and lpLockTarget and isAlive(lpLockTarget)
+           and UserInputService:IsMouseButtonPressed(Cfg.AimBot.Key) then
+            legitLockedHead = getHead(lpLockTarget)
+        end
+
+        -- PRIORITÉ 2 : WallShot Silent Aim
+        local saHead = nil
         if Cfg.WallShot.Enabled and silentTarget then
-            local head = getHead(silentTarget)
-            if head and isAlive(silentTarget) then
-                if key == "Hit" then
-                    return CFrame.new(head.Position)
-                elseif key == "UnitRay" then
-                    local origin = Camera.CFrame.Position
-                    local dir = (head.Position - origin).Unit
-                    return Ray.new(origin, dir * 999)
-                elseif key == "Target" then
-                    return head
-                end
+            saHead = getHead(silentTarget)
+            if saHead and not isAlive(silentTarget) then saHead = nil end
+        end
+
+        local activeHead = legitLockedHead or saHead
+
+        if activeHead then
+            if key == "Hit" then
+                return CFrame.new(activeHead.Position)
+            elseif key == "UnitRay" then
+                local origin = Camera.CFrame.Position
+                local dir = (activeHead.Position - origin).Unit
+                return Ray.new(origin, dir * 999)
+            elseif key == "Target" then
+                return activeHead
             end
         end
         return origIndex(self, key)
@@ -417,14 +755,18 @@ local hookSuccess = pcall(function()
 end)
 
 if not hookSuccess then
-    -- Si hookmetamethod pas dispo : on snap la caméra seulement
-    -- sans bouger la souris (pas de mousemoverel)
+    -- Si hookmetamethod pas dispo : fallback Camera snap
     RunService.RenderStepped:Connect(function()
-        if not Cfg.WallShot.Enabled or not silentTarget then return end
-        local head = getHead(silentTarget)
-        if not head or not isAlive(silentTarget) then return end
+        local activeHead = nil
+        if Cfg.LegitTrigger.Enabled and lpLockTarget and isAlive(lpLockTarget) then
+            activeHead = getHead(lpLockTarget)
+        elseif Cfg.WallShot.Enabled and silentTarget then
+            activeHead = getHead(silentTarget)
+            if activeHead and not isAlive(silentTarget) then activeHead = nil end
+        end
+        if not activeHead then return end
         local camPos = Camera.CFrame.Position
-        local dir = (head.Position - camPos).Unit
+        local dir = (activeHead.Position - camPos).Unit
         Camera.CFrame = CFrame.new(camPos, camPos + dir)
     end)
 end
@@ -574,7 +916,7 @@ end)
 Players.PlayerRemoving:Connect(removeESP)
 
 -- ══════════════════════════════════════════════════════
---   RAPID FIRE + WALL SHOT — Hook précis sur Rivals
+--   RAPID FIRE + WALL SHOT — Hook précis sur 
 --   Basé sur le vrai code de ItemLibrary :
 --   - QuickAttack = RemoteEvent de tir
 --   - ShootCooldown = cooldown par arme
@@ -583,7 +925,7 @@ Players.PlayerRemoving:Connect(removeESP)
 local rapidConn = nil
 local namecallHook = nil
 
--- Récupère le RemoteEvent QuickAttack de Rivals
+-- Récupère le RemoteEvent QuickAttack de 
 local function getQuickAttack()
     local RS = game:GetService("ReplicatedStorage")
     local ok, re = pcall(function()
@@ -715,14 +1057,14 @@ RunService.Heartbeat:Connect(function()
         local sp, on = toScreen(head.Position)
         if not on then continue end
 
-        -- Distance depuis la SOURIS (cercle FOV)
+        -- Distance depuis la SOURIS avec LE FOV DU TRIGGERBOT (son propre cercle orange)
         local d = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
-        if d < Cfg.AimBot.FOV then
-            -- Cible dans le cercle → snap silencieux + tir
+        if d < Cfg.TriggerBot.FOV then
+            -- Cible dans le cercle → snap sur TÊTE + tir
             triggerCooldown = true
             doSnap(head.Position)
             task.wait(0.05)
-            mouse1click()
+            pcall(function() mouse1click() end)
             task.wait(Cfg.TriggerBot.Delay)
             triggerCooldown = false
             break
@@ -858,6 +1200,7 @@ local WIN = Instance.new("Frame")
 WIN.Size              = UDim2.new(0, 560, 0, 400)
 WIN.Position          = UDim2.new(0.5, -280, 0.5, -200)
 WIN.BackgroundColor3  = Color3.fromRGB(12, 8, 22)
+WIN.BackgroundTransparency = 0.25
 WIN.BorderSizePixel   = 0
 WIN.ClipsDescendants  = true
 WIN.Parent            = SG
@@ -902,7 +1245,7 @@ local SUBTITLE = Instance.new("TextLabel", TBAR)
 SUBTITLE.Size          = UDim2.new(1,-100,1,0)
 SUBTITLE.Position      = UDim2.new(0,70,0,0)
 SUBTITLE.BackgroundTransparency = 1
-SUBTITLE.Text          = "| Rivals"
+SUBTITLE.Text          = " | UNIVERSAL AIME BOT"
 SUBTITLE.TextColor3    = Color3.fromRGB(160,100,220)
 SUBTITLE.TextSize      = 13
 SUBTITLE.Font          = Enum.Font.Gotham
@@ -970,6 +1313,60 @@ SEP.Position = UDim2.new(0,130,0,38)
 SEP.BackgroundColor3 = Color3.fromRGB(60,30,90)
 SEP.BorderSizePixel  = 0
 
+-- ════════════════════════════════
+--   TRANSPARENCE GÉNÉRALE PANEL
+--   Applique la transparence SUR TOUS LES ÉLÉMENTS
+-- ════════════════════════════════
+local currentPanelAlpha = 0.30  -- semi-transparent PAS TROP
+
+local function applyPanelTransparency(alpha)
+    currentPanelAlpha = alpha
+    -- Fenêtre principale
+    WIN.BackgroundTransparency = alpha
+    -- Title bar + son fix bottom corners
+    TBAR.BackgroundTransparency = alpha
+    for _, c in ipairs(TBAR:GetChildren()) do
+        if c:IsA("Frame") and not c:IsA("TextButton") and not c:IsA("UICorner") then
+            c.BackgroundTransparency = alpha
+        end
+    end
+    -- Sidebar + Content
+    SIDEBAR.BackgroundTransparency = alpha
+    CONTENT.BackgroundTransparency = alpha
+    -- Stroke
+    local stroke = WIN:FindFirstChildOfClass("UIStroke")
+    if stroke then
+        stroke.Transparency = math.clamp(alpha + 0.1, 0, 1)
+    end
+
+    -- Tous les tabs : ScrollFrame transparents (toujours)
+    for _, tab in pairs(tabs) do
+        if tab.frame then tab.frame.BackgroundTransparency = 1 end
+        -- Parcours TOUS les éléments DANS les scrollframes : Frame, TextLabel avec fond...
+        for _, c in ipairs(tab.frame:GetDescendants()) do
+            if c:IsA("Frame") then
+                -- Ne pas rendre transparent les knobs/tracks de toggle/slider (ils sont petits et colorés)
+                -- mais on rend transparent TOUS les Frame "conteneurs" (rows, infobox, etc.)
+                local isSmallDecor = c.AbsoluteSize.X > 0 and c.AbsoluteSize.Y > 0
+                                     and (c.AbsoluteSize.Y <= 20 or c.AbsoluteSize.X <= 50)
+                if not isSmallDecor then
+                    c.BackgroundTransparency = alpha
+                end
+            end
+            -- TextLabel avec fond (ex: infobox)
+            if c:IsA("TextLabel") and c.BackgroundTransparency < 1 then
+                c.BackgroundTransparency = alpha
+            end
+        end
+    end
+end
+
+-- Appliquer la transparence au démarrage
+task.defer(function()
+    task.wait(0.2)
+    applyPanelTransparency(currentPanelAlpha)
+end)
+
 -- ══════════════════
 --   TAB SYSTEM
 -- ══════════════════
@@ -977,7 +1374,7 @@ local tabs = {}
 local activeTab = nil
 
 local tabDefs = {
-    { name = "Legit",       icon = "◉" },
+    { name = "Legit V2 up", icon = "卐" },
     { name = "TriggerBot",  icon = "🎯" },
     { name = "Rage",        icon = "⚡" },
     { name = "Visuals",     icon = "👁" },
@@ -1184,22 +1581,45 @@ end
 --   POPULATE TABS
 -- ══════════════════════════════
 
--- ─── LEGIT ─────────────────────────────────────────
+-- ─── LEGIT POWER ──────────────────────────────────
 do
-    local f = tabs["Legit"].frame
+    local f = tabs["Legit Power"].frame
 
-    sectionTitle(f, "Aimbot")
-    toggle(f, "Enable",       Cfg.AimBot, "Enabled", function(v) FovCircle.Visible = v end)
+    sectionTitle(f, "💪 LEGIT POWER")
+    local infoLT = Instance.new("TextLabel", f)
+    infoLT.Size = UDim2.new(1,0,0,64)
+    infoLT.BackgroundColor3 = Color3.fromRGB(20,12,38)
+    infoLT.BorderSizePixel = 0
+    infoLT.TextColor3 = Color3.fromRGB(180,170,210)
+    infoLT.TextSize = 11
+    infoLT.Font = Enum.Font.Gotham
+    infoLT.TextWrapped = true
+    infoLT.TextXAlignment = Enum.TextXAlignment.Left
+    infoLT.Text = "  1) Tu MAINTIENS CLIC DROIT\n  2) Si ennemi DANS le cercle FOV → LOCK sur sa TETE (silencieux)\n  3) Tir AUTO en boucle (tu gardes controle de ta souris)\n  4) Lache clic droit → STOP tout"
+    Instance.new("UICorner", infoLT).CornerRadius = UDim.new(0,6)
+    local ipLT = Instance.new("UIPadding", infoLT); ipLT.PaddingLeft = UDim.new(0,8)
+
+    toggle(f, "Enable Legit Power", Cfg.LegitTrigger, "Enabled", function(v)
+        FovCircle.Visible = v or Cfg.AimBot.Enabled
+    end)
+    toggle(f, "Lock Systematiquement sur la Tete", Cfg.LegitTrigger, "LockHead")
+    toggle(f, "Cible seulement dans le cercle FOV", Cfg.LegitTrigger, "FOVOnly")
+    toggle(f, "Wall Check (pas a travers murs)", Cfg.LegitTrigger, "WallCheck")
+    toggle(f, "Team Check (ignore equipe)", Cfg.LegitTrigger, "TeamCheck")
+    slider(f, "Taille FOV Cercle", Cfg.AimBot, "FOV", 10, 400, function(v) FovCircle.Radius=v end)
+    slider(f, "Délai entre tirs (x0.01s)", Cfg.LegitTrigger, "Delay", 1, 100, function(v)
+        Cfg.LegitTrigger.Delay = v / 100
+    end)
+
+    sectionTitle(f, "🎮 AIMBOT (Vise seulement, PAS de tir auto)")
+    toggle(f, "Enable Aimbot",       Cfg.AimBot, "Enabled", function(v) FovCircle.Visible = v or Cfg.LegitTrigger.Enabled end)
     toggle(f, "Wall Check",   Cfg.AimBot, "WallCheck")
     toggle(f, "Team Check",   Cfg.AimBot, "TeamCheck")
-    toggle(f, "Smoothness",   Cfg.AimBot, "Enabled") -- juste visuel, le vrai ctrl est slider
-    slider(f, "Smoothness value", Cfg.AimBot, "Smoothness", 1, 100, function(v)
-        Cfg.AimBot.Smoothness = v / 1000  -- 1=0.001 super rapide, 100=0.1
+    slider(f, "Smoothness", Cfg.AimBot, "Smoothness", 1, 100, function(v)
+        Cfg.AimBot.Smoothness = v / 1000
     end)
-    toggle(f, "Enable Prediction", Cfg.AimBot, "Prediction")
+    toggle(f, "Prediction", Cfg.AimBot, "Prediction")
     toggle(f, "Sticky Aim",   Cfg.AimBot, "StickyAim")
-    slider(f, "FOV",          Cfg.AimBot, "FOV", 10, 400, function(v) FovCircle.Radius=v end)
-
 
 end
 
@@ -1433,6 +1853,9 @@ do
     slider(f, "Hauteur panel", {h=400}, "h", 300, 700, function(v)
         WIN.Size = UDim2.new(0,WIN.AbsoluteSize.X,0,v)
     end)
+    slider(f, "Transparence panel", {a=30}, "a", 0, 70, function(v)
+        applyPanelTransparency(v / 100)
+    end)
 
     -- ─── THEMES ────────────────────────────────────
     sectionTitle(f, "🎨 Thèmes")
@@ -1572,36 +1995,21 @@ do
 
     -- Fonction d'application du thème
     local function applyTheme(t)
-        -- Fenêtre principale
+        -- Applique les couleurs
         WIN.BackgroundColor3  = t.win
-        local winAlpha = t.winAlpha or 0
-        WIN.BackgroundTransparency = winAlpha
-
-        -- Titlebar
         TBAR.BackgroundColor3 = t.tbar
         for _, c in ipairs(TBAR:GetChildren()) do
             if c:IsA("Frame") and not c:IsA("TextButton") then
                 c.BackgroundColor3 = t.tbar
             end
         end
-
-        -- Stroke
         local stroke = WIN:FindFirstChildOfClass("UIStroke")
         if stroke then stroke.Color = t.stroke end
-
-        -- Sidebar
         SIDEBAR.BackgroundColor3 = t.sidebar
-
-        -- Content
         CONTENT.BackgroundColor3 = t.content
-
-        -- Séparateur
         SEP.BackgroundColor3 = t.sep
-
-        -- Logo dot
         logoDot.BackgroundColor3 = t.accent
 
-        -- Tous les onglets tabs
         for name, tab in pairs(tabs) do
             tab.btn.TextColor3 = (name == activeTab) and t.accent or Color3.fromRGB(180,160,210)
             if name == activeTab then
@@ -1610,34 +2018,35 @@ do
             end
         end
 
-        -- Tous les rows dans tous les scrollframes
         for _, tab in pairs(tabs) do
             for _, c in ipairs(tab.frame:GetDescendants()) do
                 if c:IsA("Frame") and c.Name == "" then
-                    -- rows de toggle/slider
                     if c.AbsoluteSize.Y <= 55 then
                         c.BackgroundColor3 = t.row
                     end
                 end
-                -- Accent color sur les toggles (knob actif) et sliders (fill)
                 if c:IsA("Frame") and c.AbsoluteSize.Y <= 6 and c.AbsoluteSize.X > 20 then
-                    -- piste slider fill
                     for _, cc in ipairs(c:GetChildren()) do
                         if cc:IsA("Frame") and cc.AbsoluteSize.Y <= 6 then
                             cc.BackgroundColor3 = t.accent
                         end
                     end
                 end
-                -- TextLabels accent
                 if c:IsA("TextLabel") and c.TextColor3 == Color3.fromRGB(255,220,0) then
                     c.TextColor3 = t.accent
                 end
             end
         end
 
-        -- FOV Circle couleur accent
         FovCircle.Color = t.accent
         Cfg.ESP.Color   = t.accent
+
+        -- Transparence : thème Transparent force 0.45, sinon garde actuelle
+        if t.winAlpha ~= nil then
+            applyPanelTransparency(t.winAlpha)
+        else
+            applyPanelTransparency(currentPanelAlpha)
+        end
     end
 
     -- Grille de boutons thèmes
@@ -1701,6 +2110,12 @@ UserInputService.InputBegan:Connect(function(i, gp)
 end)
 
 -- Activate default tab
-activateTab("Legit")
+activateTab("Legit Power")
+
+-- Applique la transparence FINALE après que TOUS les éléments ont été créés
+task.defer(function()
+    task.wait(0.3)
+    applyPanelTransparency(currentPanelAlpha)
+end)
 
 print("universal")
